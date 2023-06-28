@@ -1,0 +1,220 @@
+---
+title: "Possessive pronouns"
+output: html_document
+date: "2023-06-27"
+---
+# А corpus study of non-standard possessive pronoun ‘ихний’ in Russian
+
+## Part 1. Working with data
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(jtools)
+library(caret)
+library(pROC)
+library(partykit)
+library(randomForest)
+```
+
+Firstly, I modify the downloaded datasets by deleting the columns which I don't need. There are two datasets: dedicated to the standard form 'их' and to the nonstandard form 'ихний'.
+
+```{r}
+df.st <- read_delim("ih_parsed.csv")
+df.st %>% 
+  select(Center, grammatical_categories,
+         Author, Created, Sphere) -> df.st
+```
+
+```{r}
+df.nonst <- read_delim("ihniy_parsed.csv")
+df.nonst %>% 
+  select(Center, grammatical_categories,
+         Author, Created, Sphere) -> df.nonst
+```
+
+Then I delete those rows where the date of creation is not written in a suitable way.
+
+```{r}
+df.st %>% 
+  mutate(Created = as.numeric(Created)) %>% 
+  drop_na() -> df.st
+
+df.nonst %>% 
+  mutate(Created = as.numeric(Created)) %>% 
+  drop_na() -> df.nonst
+
+df.st$type <- "standard"
+df.nonst$type <- "non-standard"
+```
+
+Here I unite the two datasets.
+
+```{r}
+df.all <- bind_rows(df.st, df.nonst)
+```
+
+Then I work with two columns: Author and Sphere. For them, I choose six most frequent entries and for all others write "other".
+
+```{r}
+df.all %>% 
+    mutate(Author_n = ifelse(
+    Author %in% names(sort(table(Author), decreasing=TRUE))[1:6],
+    Author, "other"
+    )
+    ) %>% 
+  mutate(Sphere_n = ifelse(
+    Sphere %in% names(sort(table(Sphere), decreasing=TRUE))[1:6],
+    Sphere, "other"
+    )
+    ) -> df.all
+```
+
+## Part 2. Descriptive statistics. Visualizations.
+
+This bar chart shows overall relationship between standard and nonstandard forms.
+
+```{r}
+df.all %>% 
+  ggplot(aes(type, fill=type)) +
+    geom_bar()
+```
+
+This violin chart shows how the entities are distributed across timeline. It gives us the understanding that before 1960s modern standard form was used very rarely and before the 1900s it seems not to be used at all. Considering the modern standard form, it was had its peak in 2000s.
+
+```{r}
+df.all %>% 
+  ggplot(aes(Created, type, fill=type)) + 
+    geom_violin()
+```
+
+This chart gives an idea of distribution of standard vs nonstandard form across the genres and spheres of usage.
+
+```{r}
+df.all %>% 
+  ggplot(aes(Sphere_n, fill=type)) +
+    geom_bar() +
+    scale_x_discrete(guide = guide_axis(angle = 90))
+```
+
+This chart shows distribution of standard vs nonstandard form across the authors.
+
+```{r}
+df.all %>% 
+  ggplot(aes(Author_n, fill=type)) +
+    geom_bar() +
+    scale_x_discrete(guide = guide_axis(angle = 90))
+```
+
+## Part 3. Inferential statistics. Non-linguistic parameters.
+
+Here is the result of chi square test for Sphere and Author. P-value is low both for standard nd nonstandard form, it means that both parameters are significant.
+
+```{r}
+chisq.test(df.all$type, df.all$Sphere_n)
+chisq.test(df.all$type, df.all$Author_n)
+
+chisq.test(df.all$type, df.all$Sphere)
+chisq.test(df.all$type, df.all$Author)
+```
+However, chi square test works only for categorical variable. If we need to deal with continuous variable (for example, date), we need to use Logistic Regression.
+
+P-value is low here, so the prediction without this parameter would be much worse - date of creation is a significant parameter.
+
+```{r}
+fit_log <- glm(data=df.all,
+               as.factor(type) ~ Created,
+               family="binomial")
+
+predicted_log <- predict(fit_log, df.all)
+predicted_log <- ifelse(predicted_log > 1.5, "standard", "non-standard")
+
+confusionMatrix(as.factor(predicted_log), as.factor(df.all$type))
+
+summ(fit_log)
+```
+
+## Part 4. Inferential statistics. Pure linguistic parameters.
+
+I separate one column with grammatical categories into three columns.
+
+```{r}
+df.all %>% 
+  separate(grammatical_categories, c("animacy", "number", "gender")) -> df.all
+```
+
+Some visualization for grammatical categories.
+
+```{r}
+df.all %>% 
+  ggplot(aes(gender, fill=type)) +
+    geom_bar() +
+    facet_grid(number~animacy, scales = "free")
+```
+
+Here is the chi square test for grammatical categories: gender, number and animacy. P-value is also low.
+
+```{r}
+chisq.test(df.all$type, df.all$gender)
+chisq.test(df.all$type, df.all$number)
+chisq.test(df.all$type, df.all$animacy)
+```
+
+Logistic Regression also gives the low p-value.
+
+```{r}
+fit_log <- glm(data=df.all,
+           as.factor(type) ~ animacy + number + gender + Created + Sphere_n,
+           family="binomial")
+
+predicted_log <- predict(fit_log, df.all)
+predicted_log <- ifelse(predicted_log > 1.5, "standard", "non-standard")
+
+confusionMatrix(as.factor(predicted_log), as.factor(df.all$type))
+
+summ(fit_log)
+```
+
+```{r}
+fit_RF <- randomForest(data=df.all,
+           as.factor(type) ~ animacy + number + gender + Created + Sphere_n)
+
+fit_RF$confusion
+
+importance(fit_RF)
+```
+
+```{r}
+roc_log <- roc(as.numeric(as.factor(df.all$type)), predict(fit_log, df.all))
+roc_RF <- roc(as.numeric(as.factor(df.all$type)),
+              as.data.frame(predict(fit_RF, df.all, type = "prob"))$standard)
+
+ggroc(list("Logistic Regression"=roc_log, "Random Forest"=roc_RF))+
+  ggtitle(sprintf("AUC for LogReg is %s\nAUC for RF is %s",
+                  roc_log$auc, roc_RF$auc))
+```
+
+```{r fig.width = 20, fig.height=10}
+spheres <- c("художественная"="худ", "учебно-научная"="уч.-науч",
+             "публицистика"="пуб", "церковно-богословская"="церк",
+             "публицистика | нехудожественная"="пуб.нехуд",
+             "бытовая | нехудожественная"="быт")
+
+for.tree <- df.all %>% 
+  mutate(type=as.factor(type),
+         animacy=as.factor(animacy),
+         number=as.factor(number),
+         gender=as.factor(gender),
+         Sphere_n=as.factor(spheres[Sphere_n]),
+         Author_n=as.factor(Author_n),
+         period=Created %/% 50 + 1 - 36)
+
+tree <- ctree(type ~ animacy + gender + period + Sphere_n,
+              data = for.tree)
+
+plot(tree)
+```
